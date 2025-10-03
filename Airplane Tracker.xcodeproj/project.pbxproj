@@ -6,8 +6,15 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		76E3A22281694360EF162F6D /* Pods_Airplane_Tracker.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1490E070E157F520B9B5E396 /* Pods_Airplane_Tracker.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		1490E070E157F520B9B5E396 /* Pods_Airplane_Tracker.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Airplane_Tracker.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		AD3EC287F8F5B359AC163470 /* Pods-Airplane Tracker.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Airplane Tracker.debug.xcconfig"; path = "Target Support Files/Pods-Airplane Tracker/Pods-Airplane Tracker.debug.xcconfig"; sourceTree = "<group>"; };
 		C747CA0E2E90738500DB305F /* Airplane Tracker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Airplane Tracker.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		D2E81D83CF41F8D88D4126C1 /* Pods-Airplane Tracker.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Airplane Tracker.release.xcconfig"; path = "Target Support Files/Pods-Airplane Tracker/Pods-Airplane Tracker.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -23,17 +30,37 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				76E3A22281694360EF162F6D /* Pods_Airplane_Tracker.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		315E862AFFC23DCDDD991A4C /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				1490E070E157F520B9B5E396 /* Pods_Airplane_Tracker.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		C2ED910BB0F5C2EE3F7D9200 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				AD3EC287F8F5B359AC163470 /* Pods-Airplane Tracker.debug.xcconfig */,
+				D2E81D83CF41F8D88D4126C1 /* Pods-Airplane Tracker.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		C747CA052E90738500DB305F = {
 			isa = PBXGroup;
 			children = (
 				C747CA102E90738500DB305F /* Airplane Tracker */,
 				C747CA0F2E90738500DB305F /* Products */,
+				C2ED910BB0F5C2EE3F7D9200 /* Pods */,
+				315E862AFFC23DCDDD991A4C /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -52,9 +79,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = C747CA1C2E90738600DB305F /* Build configuration list for PBXNativeTarget "Airplane Tracker" */;
 			buildPhases = (
+				3532AAAADD93ABD44C513B5B /* [CP] Check Pods Manifest.lock */,
 				C747CA0A2E90738500DB305F /* Sources */,
 				C747CA0B2E90738500DB305F /* Frameworks */,
 				C747CA0C2E90738500DB305F /* Resources */,
+				BC17CC294F4207DE6DB5DB87 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -64,8 +93,6 @@
 				C747CA102E90738500DB305F /* Airplane Tracker */,
 			);
 			name = "Airplane Tracker";
-			packageProductDependencies = (
-			);
 			productName = "Airplane Tracker";
 			productReference = C747CA0E2E90738500DB305F /* Airplane Tracker.app */;
 			productType = "com.apple.product-type.application";
@@ -113,6 +140,48 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		3532AAAADD93ABD44C513B5B /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-Airplane Tracker-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		BC17CC294F4207DE6DB5DB87 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Airplane Tracker/Pods-Airplane Tracker-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Airplane Tracker/Pods-Airplane Tracker-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Airplane Tracker/Pods-Airplane Tracker-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		C747CA0A2E90738500DB305F /* Sources */ = {
@@ -162,7 +231,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -225,7 +294,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -246,6 +315,7 @@
 		};
 		C747CA1D2E90738600DB305F /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AD3EC287F8F5B359AC163470 /* Pods-Airplane Tracker.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -275,6 +345,7 @@
 		};
 		C747CA1E2E90738600DB305F /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D2E81D83CF41F8D88D4126C1 /* Pods-Airplane Tracker.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
