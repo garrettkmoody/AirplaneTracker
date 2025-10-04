@@ -265,15 +265,15 @@ class FlightAPIService {
         let statusColor: Color
         
         switch status.lowercased() {
-        case "enroute", "en-route", "active":
+        case "expected", "checkin", "boarding":
             statusColor = .blue
-        case "scheduled":
+        case "enroute", "departed", "approaching":
             statusColor = .green
         case "delayed":
             statusColor = .orange
-        case "cancelled", "canceled":
+        case "canceled", "diverted", "canceleduncertain":
             statusColor = .red
-        case "landed", "arrived":
+        case "arrived":
             statusColor = .gray
         default:
             statusColor = .secondary

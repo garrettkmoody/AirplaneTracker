@@ -28,17 +28,31 @@ class FlightStorage {
     static func saveFlights(_ flights: [SavedFlight]) {
         if let encoded = try? JSONEncoder().encode(flights) {
             UserDefaults.standard.set(encoded, forKey: savedFlightsKey)
+            UserDefaults.standard.synchronize() // Force sync
             print("💾 Saved \(flights.count) flights to UserDefaults")
+            for flight in flights {
+                print("   - \(flight.flightNumber) on \(flight.date)")
+            }
+        } else {
+            print("❌ Failed to encode flights for saving")
         }
     }
     
     static func loadFlights() -> [SavedFlight] {
-        guard let data = UserDefaults.standard.data(forKey: savedFlightsKey),
-              let flights = try? JSONDecoder().decode([SavedFlight].self, from: data) else {
-            print("📂 No saved flights found")
+        guard let data = UserDefaults.standard.data(forKey: savedFlightsKey) else {
+            print("📂 No saved flights data in UserDefaults")
             return []
         }
+        
+        guard let flights = try? JSONDecoder().decode([SavedFlight].self, from: data) else {
+            print("❌ Failed to decode saved flights")
+            return []
+        }
+        
         print("📂 Loaded \(flights.count) flights from UserDefaults")
+        for flight in flights {
+            print("   - \(flight.flightNumber) on \(flight.date)")
+        }
         return flights
     }
 }
@@ -56,15 +70,18 @@ struct Flight: Identifiable {
 }
 
 struct ContentView: View {
-    @State private var savedFlights: [SavedFlight] = [] {
-        didSet {
-            // Automatically save whenever savedFlights changes
-            FlightStorage.saveFlights(savedFlights)
-        }
-    }
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
+    
+    @State private var savedFlights: [SavedFlight] = []
     @State private var loadedFlights: [Flight] = []
     @State private var isLoadingFlights = false
     @State private var showingSearchView = false
+    @State private var hasLoadedFromStorage = false
+    @State private var showingPaywall = false
+    
+    private var isFirstLaunch: Bool {
+        !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
+    }
     
     var body: some View {
         NavigationView {
@@ -126,30 +143,6 @@ struct ContentView: View {
                             
                             Spacer()
                             
-                            if !savedFlights.isEmpty {
-                                Menu {
-                                    Button(action: {
-                                        loadSavedFlights()
-                                    }) {
-                                        Label("Refresh All", systemImage: "arrow.clockwise")
-                                    }
-                                    
-                                    Button(role: .destructive, action: {
-                                        savedFlights.removeAll()
-                                        loadedFlights.removeAll()
-                                    }) {
-                                        Label("Clear All", systemImage: "trash")
-                                    }
-                                } label: {
-                                    Image(systemName: "ellipsis.circle")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundColor(.blue)
-                                        .padding(8)
-                                        .background(Color.blue.opacity(0.1))
-                                        .cornerRadius(8)
-                                }
-                            }
-                            
                             Text("\(savedFlights.count)")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundColor(.secondary)
@@ -184,8 +177,11 @@ struct ContentView: View {
                                             FlightCard(flight: flight, onDelete: {
                                                 // Find and remove the saved flight
                                                 if index < savedFlights.count {
+                                                    let removedFlight = savedFlights[index]
                                                     savedFlights.remove(at: index)
                                                     loadedFlights.remove(at: index)
+                                                    FlightStorage.saveFlights(savedFlights)
+                                                    print("🗑️ Deleted flight: \(removedFlight.flightNumber)")
                                                 }
                                             })
                                         }
@@ -193,6 +189,9 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 20)
                                 .padding(.bottom, 20)
+                            }
+                            .refreshable {
+                                await refreshAllFlights()
                             }
                         }
                     }
@@ -208,10 +207,27 @@ struct ContentView: View {
                 loadSavedFlights()
             })
         }
+        .fullScreenCover(isPresented: $showingPaywall) {
+            PurchaseView(subscriptionManager: subscriptionManager, isPresented: $showingPaywall)
+        }
         .onAppear {
-            // Load saved flights from UserDefaults on app launch
-            if savedFlights.isEmpty {
+            print("📱 ContentView appeared")
+            
+            // Show paywall on first launch
+            if isFirstLaunch {
+                showingPaywall = true
+                UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+                print("🎉 First launch - showing paywall")
+            }
+            
+            // Load saved flights from UserDefaults only once
+            if !hasLoadedFromStorage {
+                print("📂 Loading flights from UserDefaults...")
                 savedFlights = FlightStorage.loadFlights()
+                print("📂 Loaded \(savedFlights.count) saved flights")
+                hasLoadedFromStorage = true
+            } else {
+                print("⏭️ Skipping load - already loaded from storage")
             }
             // Then fetch live data
             loadSavedFlights()
@@ -262,6 +278,37 @@ struct ContentView: View {
             }
         }
     }
+    
+    private func refreshAllFlights() async {
+        guard !savedFlights.isEmpty else {
+            return
+        }
+        
+        print("🔄 Pull-to-refresh triggered")
+        
+        var flights: [Flight] = []
+        
+        for savedFlight in savedFlights {
+            do {
+                let flightDataArray = try await FlightAPIService.shared.searchFlight(
+                    flightNumber: savedFlight.flightNumber,
+                    date: savedFlight.date
+                )
+                
+                if let flightData = flightDataArray.first,
+                   let flight = FlightAPIService.convertToFlight(flightData) {
+                    flights.append(flight)
+                }
+            } catch {
+                print("  ❌ Error refreshing \(savedFlight.flightNumber): \(error)")
+            }
+        }
+        
+        await MainActor.run {
+            loadedFlights = flights
+            print("✅ Refreshed \(flights.count) flights")
+        }
+    }
 }
 
 struct FlightSearchView: View {
@@ -270,6 +317,7 @@ struct FlightSearchView: View {
     let onFlightAdded: () -> Void
     
     @State private var flightNumber = ""
+    @State private var selectedDate = Date()
     
     @State private var searchResults: [Flight] = []
     @State private var isSearching = false
@@ -284,11 +332,11 @@ struct FlightSearchView: View {
                 VStack(spacing: 20) {
                     // Info Text
                     VStack(spacing: 8) {
-                        Text("🔍 Search by Flight Number")
+                        Text("🔍 Search for a Flight")
                             .font(.system(size: 18, weight: .bold))
                             .foregroundColor(.primary)
                         
-                        Text("Enter the full flight number including airline code")
+                        Text("Enter flight number and date")
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -297,19 +345,38 @@ struct FlightSearchView: View {
                     
                     // Search Form
                     VStack(spacing: 15) {
-                        // Flight Number
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Flight Number")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.secondary)
+                        // Flight Number and Date in a row
+                        HStack(spacing: 12) {
+                            // Flight Number
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Flight Number")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                
+                                TextField("e.g. AS25", text: $flightNumber)
+                                    .textFieldStyle(.plain)
+                                    .padding()
+                                    .background(Color.white)
+                                    .cornerRadius(12)
+                                    .autocapitalization(.allCharacters)
+                                    .disableAutocorrection(true)
+                            }
+                            .frame(maxWidth: .infinity)
                             
-                            TextField("e.g. AS25, AA1004, DL123", text: $flightNumber)
-                                .textFieldStyle(.plain)
-                                .padding()
-                                .background(Color.white)
-                                .cornerRadius(12)
-                                .autocapitalization(.allCharacters)
-                                .disableAutocorrection(true)
+                            // Date Picker
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Date")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                
+                                DatePicker("", selection: $selectedDate, displayedComponents: .date)
+                                    .datePickerStyle(.compact)
+                                    .padding()
+                                    .background(Color.white)
+                                    .cornerRadius(12)
+                                    .labelsHidden()
+                            }
+                            .frame(width: 140)
                         }
                         
                         // Search Button
@@ -391,9 +458,15 @@ struct FlightSearchView: View {
         
         Task {
             do {
-                // Search by flight number
+                // Format date as YYYY-MM-DD
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+                let dateString = dateFormatter.string(from: selectedDate)
+                
+                // Search by flight number with date
                 let flightDataArray = try await FlightAPIService.shared.searchFlight(
-                    flightNumber: flightNumber.uppercased()
+                    flightNumber: flightNumber.uppercased(),
+                    date: dateString
                 )
                 
                 // Convert to UI flights
@@ -450,15 +523,25 @@ struct FlightSearchView: View {
     private func saveFlight(_ flight: Flight) {
         // Extract date from scheduled departure time
         guard let date = FlightAPIService.extractDate(from: flight.fullData.departure?.scheduledTime?.utc) else {
-            print("Cannot save flight: no scheduled time")
+            print("❌ Cannot save flight: no scheduled time")
             return
         }
+        
+        print("📝 Attempting to save flight: \(flight.flightNumber) on \(date)")
         
         // Check if not already saved
         if !savedFlights.contains(where: { $0.flightNumber == flight.flightNumber && $0.date == date }) {
             let savedFlight = SavedFlight(flightNumber: flight.flightNumber, date: date)
             savedFlights.append(savedFlight)
+            print("✅ Flight saved! Total saved flights: \(savedFlights.count)")
+            print("   Flight details: \(savedFlight.flightNumber) - \(savedFlight.date)")
+            
+            // Explicitly save to UserDefaults to ensure it persists
+            FlightStorage.saveFlights(savedFlights)
+            
             onFlightAdded()
+        } else {
+            print("⚠️ Flight already saved")
         }
     }
 }
@@ -509,7 +592,7 @@ struct SearchResultCard: View {
                 
                 Spacer()
                 
-                VStack(spacing: 8) {
+                VStack(alignment: .trailing, spacing: 8) {
                     Text(flight.status)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.white)
@@ -517,6 +600,18 @@ struct SearchResultCard: View {
                         .padding(.vertical, 6)
                         .background(flight.statusColor)
                         .cornerRadius(8)
+                    
+                    // Live tracking indicator
+                    if flight.fullData.location != nil {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 6, height: 6)
+                            Text("Live")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.green)
+                        }
+                    }
                     
                     Button(action: {
                         onSave()
@@ -535,7 +630,10 @@ struct SearchResultCard: View {
             .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
         }
         .sheet(isPresented: $showingDetail) {
-            FlightDetailView(flight: flight)
+            FlightDetailView(flight: flight, onSave: {
+                onSave()
+                isSaved = true
+            })
         }
     }
 }
@@ -615,7 +713,7 @@ struct FlightCard: View {
             .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
         }
         .sheet(isPresented: $showingDetail) {
-            FlightDetailView(flight: flight)
+            FlightDetailView(flight: flight, onDelete: onDelete)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             if let onDelete = onDelete {
@@ -632,12 +730,17 @@ struct FlightCard: View {
 struct FlightDetailView: View {
     @Environment(\.dismiss) var dismiss
     let flight: Flight
+    var onDelete: (() -> Void)? = nil
+    var onSave: (() -> Void)? = nil
     
     @State private var currentFlight: Flight
     @State private var isRefreshing = false
+    @State private var isSaved = false
     
-    init(flight: Flight) {
+    init(flight: Flight, onDelete: (() -> Void)? = nil, onSave: (() -> Void)? = nil) {
         self.flight = flight
+        self.onDelete = onDelete
+        self.onSave = onSave
         _currentFlight = State(initialValue: flight)
     }
     
@@ -818,8 +921,32 @@ struct FlightDetailView: View {
                 }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        dismiss()
+                    HStack(spacing: 16) {
+                        // Show delete button if this is from saved flights
+                        if let onDelete = onDelete {
+                            Button(role: .destructive, action: {
+                                onDelete()
+                                dismiss()
+                            }) {
+                                Image(systemName: "trash")
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        
+                        // Show save button if this is from search results
+                        if let onSave = onSave {
+                            Button(action: {
+                                onSave()
+                                isSaved = true
+                            }) {
+                                Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                                    .foregroundColor(isSaved ? .blue : .blue)
+                            }
+                        }
+                        
+                        Button("Done") {
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -982,15 +1109,16 @@ struct LiveTrackingMapView: View {
             .padding(.horizontal)
             
             // Map with flight path
-            ZStack {
-                Map(coordinateRegion: .constant(region), annotationItems: createAnnotations()) { item in
-                    MapAnnotation(coordinate: item.coordinate) {
-                        createMarkerView(for: item)
-                    }
-                }
-                .frame(height: 300)
-                .cornerRadius(16)
-            }
+            FlightPathMapView(
+                coordinate: coordinate,
+                region: region,
+                annotations: createAnnotations(),
+                departure: departure,
+                flightNumber: flightNumber,
+                location: location
+            )
+            .frame(height: 300)
+            .cornerRadius(16)
             .padding(.horizontal)
             
             // Live Data Grid
@@ -1163,6 +1291,196 @@ struct LiveTrackingMapView: View {
             return components[1].replacingOccurrences(of: "Z", with: " UTC")
         }
         return time
+    }
+}
+
+// Custom MapKit view with polyline support
+struct FlightPathMapView: UIViewRepresentable {
+    let coordinate: CLLocationCoordinate2D
+    let region: MKCoordinateRegion
+    let annotations: [FlightMapPoint]
+    let departure: AirportInfo?
+    let flightNumber: String
+    let location: LiveLocation
+    
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView()
+        mapView.delegate = context.coordinator
+        mapView.setRegion(region, animated: false)
+        return mapView
+    }
+    
+    func updateUIView(_ mapView: MKMapView, context: Context) {
+        // Remove existing annotations and overlays
+        mapView.removeAnnotations(mapView.annotations)
+        mapView.removeOverlays(mapView.overlays)
+        
+        // Update region
+        mapView.setRegion(region, animated: true)
+        
+        // Add annotations
+        for item in annotations {
+            let annotation = FlightAnnotation(
+                coordinate: item.coordinate,
+                title: item.label,
+                type: item.type,
+                heading: location.trueTrack?.deg ?? 0
+            )
+            mapView.addAnnotation(annotation)
+        }
+        
+        // Draw red line from departure to current location
+        if let dep = departure,
+           let depLat = dep.location?.lat,
+           let depLon = dep.location?.lon {
+            let departureCoord = CLLocationCoordinate2D(latitude: depLat, longitude: depLon)
+            let coordinates = [departureCoord, coordinate]
+            let polyline = MKPolyline(coordinates: coordinates, count: 2)
+            mapView.addOverlay(polyline)
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, MKMapViewDelegate {
+        var parent: FlightPathMapView
+        
+        init(_ parent: FlightPathMapView) {
+            self.parent = parent
+        }
+        
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            let identifier = "FlightAnnotation"
+            
+            guard let flightAnnotation = annotation as? FlightAnnotation else {
+                return nil
+            }
+            
+            let annotationView = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+            annotationView.canShowCallout = true
+            
+            // Create custom view based on type
+            let customView: UIView
+            
+            switch flightAnnotation.annotationType {
+            case .plane:
+                // Plane marker with rotation
+                let container = UIView(frame: CGRect(x: 0, y: 0, width: 60, height: 70))
+                
+                let circle = UIView(frame: CGRect(x: 8, y: 0, width: 44, height: 44))
+                circle.backgroundColor = .systemBlue
+                circle.layer.cornerRadius = 22
+                circle.layer.shadowColor = UIColor.systemBlue.cgColor
+                circle.layer.shadowOpacity = 0.4
+                circle.layer.shadowRadius = 6
+                circle.layer.shadowOffset = .zero
+                
+                let imageView = UIImageView(frame: CGRect(x: 11, y: 11, width: 22, height: 22))
+                imageView.image = UIImage(systemName: "airplane")?.withTintColor(.white, renderingMode: .alwaysOriginal)
+                imageView.contentMode = .scaleAspectFit
+                
+                // Rotate the plane icon
+                let rotationAngle = (flightAnnotation.heading - 90) * .pi / 180 // Adjust for icon orientation
+                imageView.transform = CGAffineTransform(rotationAngle: rotationAngle)
+                
+                circle.addSubview(imageView)
+                container.addSubview(circle)
+                
+                // Label
+                let label = UILabel(frame: CGRect(x: 0, y: 48, width: 60, height: 20))
+                label.text = flightAnnotation.title
+                label.font = UIFont.systemFont(ofSize: 11, weight: .bold)
+                label.textAlignment = .center
+                label.backgroundColor = .white
+                label.layer.cornerRadius = 6
+                label.clipsToBounds = true
+                label.layer.shadowColor = UIColor.black.cgColor
+                label.layer.shadowOpacity = 0.2
+                label.layer.shadowRadius = 3
+                label.layer.shadowOffset = .zero
+                container.addSubview(label)
+                
+                customView = container
+                
+            case .departure:
+                // Green circle for departure
+                let container = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 30))
+                
+                let circle = UIView(frame: CGRect(x: 14, y: 0, width: 12, height: 12))
+                circle.backgroundColor = .systemGreen
+                circle.layer.cornerRadius = 6
+                circle.layer.borderWidth = 2
+                circle.layer.borderColor = UIColor.white.cgColor
+                container.addSubview(circle)
+                
+                let label = UILabel(frame: CGRect(x: 0, y: 14, width: 40, height: 16))
+                label.text = flightAnnotation.title
+                label.font = UIFont.systemFont(ofSize: 10, weight: .semibold)
+                label.textAlignment = .center
+                label.backgroundColor = UIColor.white.withAlphaComponent(0.9)
+                label.layer.cornerRadius = 4
+                label.clipsToBounds = true
+                container.addSubview(label)
+                
+                customView = container
+                
+            case .arrival:
+                // Red circle for arrival
+                let container = UIView(frame: CGRect(x: 0, y: 0, width: 40, height: 30))
+                
+                let circle = UIView(frame: CGRect(x: 14, y: 0, width: 12, height: 12))
+                circle.backgroundColor = .systemRed
+                circle.layer.cornerRadius = 6
+                circle.layer.borderWidth = 2
+                circle.layer.borderColor = UIColor.white.cgColor
+                container.addSubview(circle)
+                
+                let label = UILabel(frame: CGRect(x: 0, y: 14, width: 40, height: 16))
+                label.text = flightAnnotation.title
+                label.font = UIFont.systemFont(ofSize: 10, weight: .semibold)
+                label.textAlignment = .center
+                label.backgroundColor = UIColor.white.withAlphaComponent(0.9)
+                label.layer.cornerRadius = 4
+                label.clipsToBounds = true
+                container.addSubview(label)
+                
+                customView = container
+            }
+            
+            annotationView.addSubview(customView)
+            annotationView.frame = customView.frame
+            
+            return annotationView
+        }
+        
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = .systemRed
+                renderer.lineWidth = 3.0
+                renderer.lineDashPattern = [2, 4] // Dashed line
+                return renderer
+            }
+            return MKOverlayRenderer(overlay: overlay)
+        }
+    }
+}
+
+// Custom annotation class
+class FlightAnnotation: NSObject, MKAnnotation {
+    var coordinate: CLLocationCoordinate2D
+    var title: String?
+    var annotationType: FlightMapPoint.AnnotationType
+    var heading: Double
+    
+    init(coordinate: CLLocationCoordinate2D, title: String?, type: FlightMapPoint.AnnotationType, heading: Double) {
+        self.coordinate = coordinate
+        self.title = title
+        self.annotationType = type
+        self.heading = heading
+        super.init()
     }
 }
 
