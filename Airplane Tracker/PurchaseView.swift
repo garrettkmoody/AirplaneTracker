@@ -378,7 +378,7 @@ struct PurchaseView: View {
                                                 }
                                             }),
                                             .default(Text("Privacy Policy"), action: {
-                                                if let url = URL(string: "https://labubucollector.wordpress.com/privacy-policy/") {
+                                                if let url = URL(string: "https://appsupportpages.web.app/airplane-tracker/privacy") {
                                                     UIApplication.shared.open(url)
                                                 }
                                             }),

@@ -7,6 +7,8 @@
 
 import SwiftUI
 import MapKit
+import StoreKit
+import FirebaseAnalytics
 
 // Saved flight reference - only stores flight number and date
 struct SavedFlight: Identifiable, Codable {
@@ -66,7 +68,31 @@ struct Flight: Identifiable {
     let arrival: String
     let status: String
     let statusColor: Color
-    let fullData: FlightData // Store full API data for detail view
+    let fullData: FlightData? // Store full API data for detail view (nil for error states)
+    let hasError: Bool // True if flight failed to load
+    
+    init(flightNumber: String, airline: String, departure: String, arrival: String, status: String, statusColor: Color, fullData: FlightData) {
+        self.flightNumber = flightNumber
+        self.airline = airline
+        self.departure = departure
+        self.arrival = arrival
+        self.status = status
+        self.statusColor = statusColor
+        self.fullData = fullData
+        self.hasError = false
+    }
+    
+    // Error state initializer
+    init(failedFlightNumber: String) {
+        self.flightNumber = failedFlightNumber
+        self.airline = "Failed to load"
+        self.departure = ""
+        self.arrival = ""
+        self.status = "Error"
+        self.statusColor = .red
+        self.fullData = nil
+        self.hasError = true
+    }
 }
 
 struct ContentView: View {
@@ -78,9 +104,15 @@ struct ContentView: View {
     @State private var showingSearchView = false
     @State private var hasLoadedFromStorage = false
     @State private var showingPaywall = false
+    @State private var showingSettings = false
+    @State private var showingOnboarding = false
     
     private var isFirstLaunch: Bool {
         !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
+    }
+    
+    private var hasSeenOnboarding: Bool {
+        UserDefaults.standard.bool(forKey: "hasSeenOnboarding")
     }
     
     var body: some View {
@@ -110,6 +142,7 @@ struct ContentView: View {
                     
                     // Main search button
                     Button(action: {
+                        Analytics.logEvent("search_button_clicked", parameters: nil)
                         showingSearchView = true
                     }) {
                         HStack(spacing: 15) {
@@ -174,16 +207,20 @@ struct ContentView: View {
                                             .padding()
                                     } else {
                                         ForEach(Array(loadedFlights.enumerated()), id: \.element.id) { index, flight in
-                                            FlightCard(flight: flight, onDelete: {
-                                                // Find and remove the saved flight
-                                                if index < savedFlights.count {
-                                                    let removedFlight = savedFlights[index]
-                                                    savedFlights.remove(at: index)
-                                                    loadedFlights.remove(at: index)
-                                                    FlightStorage.saveFlights(savedFlights)
-                                                    print("🗑️ Deleted flight: \(removedFlight.flightNumber)")
+                                            FlightCard(
+                                                flight: flight,
+                                                savedDate: index < savedFlights.count ? savedFlights[index].date : nil,
+                                                onDelete: {
+                                                    // Find and remove the saved flight
+                                                    if index < savedFlights.count {
+                                                        let removedFlight = savedFlights[index]
+                                                        savedFlights.remove(at: index)
+                                                        loadedFlights.remove(at: index)
+                                                        FlightStorage.saveFlights(savedFlights)
+                                                        print("🗑️ Deleted flight: \(removedFlight.flightNumber)")
+                                                    }
                                                 }
-                                            })
+                                            )
                                         }
                                     }
                                 }
@@ -200,24 +237,62 @@ struct ContentView: View {
                     Spacer()
                 }
             }
-            .navigationBarHidden(true)
+            .navigationBarHidden(false)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        showingSettings = true
+                    }) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(.blue)
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showingSearchView) {
-            FlightSearchView(savedFlights: $savedFlights, onFlightAdded: {
-                loadSavedFlights()
+            FlightSearchView(
+                savedFlights: $savedFlights,
+                subscriptionManager: subscriptionManager,
+                onFlightAdded: {
+                    loadSavedFlights()
+                },
+                onUpgradeNeeded: {
+                    showingSearchView = false
+                    showingPaywall = true
+                }
+            )
+        }
+        .fullScreenCover(isPresented: $showingOnboarding) {
+            OnboardingView(isPresented: $showingOnboarding, onComplete: {
+                // After onboarding, show paywall
+                showingPaywall = true
             })
         }
         .fullScreenCover(isPresented: $showingPaywall) {
             PurchaseView(subscriptionManager: subscriptionManager, isPresented: $showingPaywall)
         }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(
+                subscriptionManager: subscriptionManager,
+                onUpgrade: {
+                    Analytics.logEvent("upgrade_button_clicked", parameters: [
+                        "source": "settings"
+                    ])
+                    showingSettings = false
+                    showingPaywall = true
+                }
+            )
+        }
         .onAppear {
             print("📱 ContentView appeared")
             
-            // Show paywall on first launch
-            if isFirstLaunch {
-                showingPaywall = true
+            // Show onboarding on first launch
+            if isFirstLaunch && !hasSeenOnboarding {
+                showingOnboarding = true
                 UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
-                print("🎉 First launch - showing paywall")
+                print("🎉 First launch - showing onboarding")
             }
             
             // Load saved flights from UserDefaults only once
@@ -247,26 +322,37 @@ struct ContentView: View {
             
             print("=== LOADING SAVED FLIGHTS ===")
             for savedFlight in savedFlights {
-                print("Loading: \(savedFlight.flightNumber) on \(savedFlight.date)")
+                print("🔍 Loading saved flight:")
+                print("   Flight Number: \(savedFlight.flightNumber)")
+                print("   Saved Date: \(savedFlight.date)")
+                print("   API Request: /flights/\(savedFlight.flightNumber)/\(savedFlight.date)?single=true")
                 do {
                     let flightDataArray = try await FlightAPIService.shared.searchFlight(
                         flightNumber: savedFlight.flightNumber,
-                        date: savedFlight.date
+                        date: savedFlight.date,
+                        single: true  // Only get the flight matching departure date
                     )
                     
                     if let flightData = flightDataArray.first,
                        let flight = FlightAPIService.convertToFlight(flightData) {
                         flights.append(flight)
+                        print("   ✅ Flight data received:")
+                        print("      Departure UTC: \(flightData.departure?.scheduledTime?.utc ?? "nil")")
+                        print("      Arrival UTC: \(flightData.arrival?.scheduledTime?.utc ?? "nil")")
                         if flightData.location != nil {
-                            print("  ✅ Has live location data")
+                            print("      Has live location data: YES")
                         } else {
-                            print("  ⚠️ No live location data")
+                            print("      Has live location data: NO")
                         }
                     } else {
                         print("  ❌ Could not convert flight data")
+                        // Add error flight so user can see and delete it
+                        flights.append(Flight(failedFlightNumber: savedFlight.flightNumber))
                     }
                 } catch {
                     print("  ❌ Error: \(error)")
+                    // Add error flight so user can see and delete it
+                    flights.append(Flight(failedFlightNumber: savedFlight.flightNumber))
                 }
             }
             print("Loaded \(flights.count) of \(savedFlights.count) flights")
@@ -289,10 +375,12 @@ struct ContentView: View {
         var flights: [Flight] = []
         
         for savedFlight in savedFlights {
+            print("   Refreshing: \(savedFlight.flightNumber) on date \(savedFlight.date)")
             do {
                 let flightDataArray = try await FlightAPIService.shared.searchFlight(
                     flightNumber: savedFlight.flightNumber,
-                    date: savedFlight.date
+                    date: savedFlight.date,
+                    single: true  // Only get the flight matching departure date
                 )
                 
                 if let flightData = flightDataArray.first,
@@ -314,7 +402,9 @@ struct ContentView: View {
 struct FlightSearchView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var savedFlights: [SavedFlight]
+    @ObservedObject var subscriptionManager: SubscriptionManager
     let onFlightAdded: () -> Void
+    let onUpgradeNeeded: () -> Void
     
     @State private var flightNumber = ""
     @State private var selectedDate = Date()
@@ -322,6 +412,8 @@ struct FlightSearchView: View {
     @State private var searchResults: [Flight] = []
     @State private var isSearching = false
     @State private var errorMessage: String?
+    @State private var searchCount: Int = UserDefaults.standard.integer(forKey: "searchCount")
+    @State private var showingPaywall = false
     
     var body: some View {
         NavigationView {
@@ -330,6 +422,46 @@ struct FlightSearchView: View {
                     .ignoresSafeArea()
                 
                 VStack(spacing: 20) {
+                    // Free Search Indicator (for non-subscribers)
+                    if !subscriptionManager.hasActiveSubscription {
+                        HStack(spacing: 8) {
+                            Image(systemName: searchCount >= 1 ? "exclamationmark.circle.fill" : "info.circle.fill")
+                                .foregroundColor(searchCount >= 1 ? .orange : .blue)
+                            
+                            if searchCount >= 1 {
+                                Text("No free searches remaining")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.primary)
+                            } else {
+                                Text("1 free search remaining")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.primary)
+                            }
+                            
+                            Spacer()
+                            
+                            Button(action: {
+                                Analytics.logEvent("upgrade_button_clicked", parameters: [
+                                    "source": "search_banner"
+                                ])
+                                showingPaywall = true
+                            }) {
+                                Text("Upgrade")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue)
+                                    .cornerRadius(8)
+                            }
+                        }
+                        .padding()
+                        .background(searchCount >= 1 ? Color.orange.opacity(0.1) : Color.blue.opacity(0.1))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                        .padding(.top, 10)
+                    }
+                    
                     // Info Text
                     VStack(spacing: 8) {
                         Text("🔍 Search for a Flight")
@@ -341,7 +473,7 @@ struct FlightSearchView: View {
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
                     }
-                    .padding(.top, 20)
+                    .padding(.top, subscriptionManager.hasActiveSubscription ? 20 : 10)
                     
                     // Search Form
                     VStack(spacing: 15) {
@@ -425,8 +557,8 @@ struct FlightSearchView: View {
                             ScrollView {
                                 VStack(spacing: 12) {
                                     ForEach(searchResults) { flight in
-                                        SearchResultCard(flight: flight, onSave: {
-                                            saveFlight(flight)
+                                        SearchResultCard(flight: flight, onSave: { completion in
+                                            saveFlight(flight, completion: completion)
                                         })
                                     }
                                 }
@@ -448,10 +580,40 @@ struct FlightSearchView: View {
                     }
                 }
             }
+            .onAppear {
+                // Reset search count if user subscribes
+                if subscriptionManager.hasActiveSubscription {
+                    searchCount = 0
+                    UserDefaults.standard.set(0, forKey: "searchCount")
+                }
+            }
+            .fullScreenCover(isPresented: $showingPaywall) {
+                PurchaseView(subscriptionManager: subscriptionManager, isPresented: $showingPaywall)
+            }
+            .onChange(of: subscriptionManager.hasActiveSubscription) { isSubscribed in
+                if isSubscribed {
+                    // Reset search count when user subscribes
+                    searchCount = 0
+                    UserDefaults.standard.set(0, forKey: "searchCount")
+                }
+            }
         }
     }
     
     private func performSearch() {
+        // Check if user is subscribed
+        if !subscriptionManager.hasActiveSubscription {
+            // Non-subscribers can only do 1 search
+            if searchCount >= 1 {
+                print("🚫 Non-subscriber reached search limit")
+                Analytics.logEvent("upgrade_button_clicked", parameters: [
+                    "source": "search_limit_reached"
+                ])
+                showingPaywall = true
+                return
+            }
+        }
+        
         errorMessage = nil
         isSearching = true
         searchResults = []
@@ -501,6 +663,20 @@ struct FlightSearchView: View {
                     searchResults = flights
                     isSearching = false
                     
+                    // Log successful search
+                    Analytics.logEvent("flight_searched", parameters: [
+                        "flight_number": flightNumber.uppercased(),
+                        "results_count": flights.count,
+                        "has_subscription": subscriptionManager.hasActiveSubscription
+                    ])
+                    
+                    // Increment search count for non-subscribers
+                    if !subscriptionManager.hasActiveSubscription {
+                        searchCount += 1
+                        UserDefaults.standard.set(searchCount, forKey: "searchCount")
+                        print("📊 Search count: \(searchCount)")
+                    }
+                    
                     if flights.isEmpty {
                         errorMessage = "No flights found for \(flightNumber)"
                     }
@@ -508,7 +684,12 @@ struct FlightSearchView: View {
                 
             } catch let error as FlightAPIError {
                 await MainActor.run {
-                    errorMessage = error.errorDescription
+                    // Show "No flights found" for 503 errors
+                    if case .httpError(let code, _) = error, code == 503 {
+                        errorMessage = "No flights found for \(flightNumber)"
+                    } else {
+                        errorMessage = error.errorDescription
+                    }
                     isSearching = false
                 }
             } catch {
@@ -520,14 +701,45 @@ struct FlightSearchView: View {
         }
     }
     
-    private func saveFlight(_ flight: Flight) {
-        // Extract date from scheduled departure time
-        guard let date = FlightAPIService.extractDate(from: flight.fullData.departure?.scheduledTime?.utc) else {
-            print("❌ Cannot save flight: no scheduled time")
+    private func saveFlight(_ flight: Flight, completion: @escaping (Bool) -> Void) {
+        // Log save attempt
+        Analytics.logEvent("save_flight_clicked", parameters: [
+            "flight_number": flight.flightNumber,
+            "has_subscription": subscriptionManager.hasActiveSubscription
+        ])
+        
+        // Check if user is subscribed
+        if !subscriptionManager.hasActiveSubscription {
+            print("🚫 Non-subscriber attempted to save flight")
+            Analytics.logEvent("upgrade_button_clicked", parameters: [
+                "source": "save_flight_blocked"
+            ])
+            showingPaywall = true
+            completion(false)
             return
         }
         
-        print("📝 Attempting to save flight: \(flight.flightNumber) on \(date)")
+        // Extract date from LOCAL departure time (not UTC!)
+        guard let departureLocal = flight.fullData?.departure?.scheduledTime?.local else {
+            print("❌ Cannot save flight: no local scheduled departure time")
+            completion(false)
+            return
+        }
+        
+        // Extract date from format like "2025-10-05 06:38-07:00"
+        let dateComponents = departureLocal.components(separatedBy: " ")
+        guard let date = dateComponents.first else {
+            print("❌ Cannot save flight: invalid date format in \(departureLocal)")
+            completion(false)
+            return
+        }
+        
+        print("🔍 DEBUG - Saving flight:")
+        print("   Flight Number: \(flight.flightNumber)")
+        print("   Departure Local: \(departureLocal)")
+        print("   Extracted Departure Date: \(date)")
+        print("   Arrival Local: \(flight.fullData?.arrival?.scheduledTime?.local ?? "nil")")
+        print("📝 Saving flight: \(flight.flightNumber) on \(date) (using local departure date)")
         
         // Check if not already saved
         if !savedFlights.contains(where: { $0.flightNumber == flight.flightNumber && $0.date == date }) {
@@ -539,18 +751,26 @@ struct FlightSearchView: View {
             // Explicitly save to UserDefaults to ensure it persists
             FlightStorage.saveFlights(savedFlights)
             
+            // Log successful save
+            Analytics.logEvent("flight_saved", parameters: [
+                "flight_number": flight.flightNumber,
+                "total_saved_flights": savedFlights.count
+            ])
+            
             onFlightAdded()
+            completion(true)
         } else {
             print("⚠️ Flight already saved")
+            completion(true) // Still return true since it's saved
         }
     }
 }
 
 struct SearchResultCard: View {
     let flight: Flight
-    let onSave: () -> Void
-    @State private var isSaved = false
+    let onSave: (@escaping (Bool) -> Void) -> Void
     @State private var showingDetail = false
+    @State private var isSaved = false
     
     var body: some View {
         Button(action: {
@@ -602,7 +822,7 @@ struct SearchResultCard: View {
                         .cornerRadius(8)
                     
                     // Live tracking indicator
-                    if flight.fullData.location != nil {
+                    if flight.fullData?.location != nil {
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(Color.green)
@@ -614,11 +834,14 @@ struct SearchResultCard: View {
                     }
                     
                     Button(action: {
-                        onSave()
-                        isSaved = true
+                        onSave { success in
+                            if success {
+                                isSaved = true
+                            }
+                        }
                     }) {
                         Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                            .foregroundColor(isSaved ? .blue : .gray)
+                            .foregroundColor(.blue)
                             .font(.system(size: 20))
                     }
                     .buttonStyle(BorderlessButtonStyle())
@@ -630,9 +853,23 @@ struct SearchResultCard: View {
             .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
         }
         .sheet(isPresented: $showingDetail) {
-            FlightDetailView(flight: flight, onSave: {
-                onSave()
-                isSaved = true
+            FlightDetailView(flight: flight, onSave: { completion in
+                // Dismiss detail first, then trigger save (which may show paywall)
+                // Set flag to prevent review prompt when dismissing programmatically
+                UserDefaults.standard.set(true, forKey: "dismissedForPaywall")
+                showingDetail = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    onSave { success in
+                        completion(success)
+                        if success {
+                            isSaved = true
+                        }
+                        // Clear flag after action completes
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            UserDefaults.standard.set(false, forKey: "dismissedForPaywall")
+                        }
+                    }
+                }
             })
         }
     }
@@ -640,21 +877,25 @@ struct SearchResultCard: View {
 
 struct FlightCard: View {
     let flight: Flight
+    var savedDate: String? = nil  // The date from SavedFlight for refresh purposes
     var onDelete: (() -> Void)? = nil
     @State private var showingDetail = false
     
     var body: some View {
         Button(action: {
-            showingDetail = true
+            // Only show detail if flight loaded successfully
+            if !flight.hasError {
+                showingDetail = true
+            }
         }) {
             HStack(spacing: 15) {
-                // Airline icon
+                // Icon
                 Circle()
-                    .fill(Color.blue.opacity(0.1))
+                    .fill(flight.hasError ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
                     .frame(width: 50, height: 50)
                     .overlay(
-                        Image(systemName: "airplane.circle.fill")
-                            .foregroundColor(.blue)
+                        Image(systemName: flight.hasError ? "exclamationmark.triangle.fill" : "airplane.circle.fill")
+                            .foregroundColor(flight.hasError ? .red : .blue)
                             .font(.system(size: 24))
                     )
                 
@@ -663,57 +904,67 @@ struct FlightCard: View {
                         .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.primary)
                     
-                    Text(flight.airline)
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                    
-                    HStack(spacing: 8) {
-                        Text(flight.departure)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
-                        
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 12))
+                    if flight.hasError {
+                        Text("Failed to load")
+                            .font(.system(size: 14))
+                            .foregroundColor(.red)
+                    } else {
+                        Text(flight.airline)
+                            .font(.system(size: 14))
                             .foregroundColor(.secondary)
                         
-                        Text(flight.arrival)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
+                        HStack(spacing: 8) {
+                            Text(flight.departure)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.primary)
+                            
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            
+                            Text(flight.arrival)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.primary)
+                        }
                     }
                 }
                 
                 Spacer()
                 
-                VStack(alignment: .trailing, spacing: 6) {
-                    // Status badge
-                    Text(flight.status)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(flight.statusColor)
-                        .cornerRadius(8)
-                    
-                    // Live tracking indicator
-                    if flight.fullData.location != nil {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 6, height: 6)
-                            Text("Live")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.green)
+                if !flight.hasError {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        // Status badge
+                        Text(flight.status)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(flight.statusColor)
+                            .cornerRadius(8)
+                        
+                        // Live tracking indicator
+                        if flight.fullData?.location != nil {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 6, height: 6)
+                                Text("Live")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.green)
+                            }
                         }
                     }
                 }
             }
             .padding(16)
-            .background(Color.white)
+            .background(flight.hasError ? Color.red.opacity(0.05) : Color.white)
             .cornerRadius(16)
             .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
         }
         .sheet(isPresented: $showingDetail) {
-            FlightDetailView(flight: flight, onDelete: onDelete)
+            if !flight.hasError {
+                FlightDetailView(flight: flight, onDelete: onDelete, savedDate: savedDate)
+            }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             if let onDelete = onDelete {
@@ -731,17 +982,53 @@ struct FlightDetailView: View {
     @Environment(\.dismiss) var dismiss
     let flight: Flight
     var onDelete: (() -> Void)? = nil
-    var onSave: (() -> Void)? = nil
+    var onSave: ((@escaping (Bool) -> Void) -> Void)? = nil
+    var savedDate: String? = nil  // The date from SavedFlight (YYYY-MM-DD format)
     
     @State private var currentFlight: Flight
     @State private var isRefreshing = false
     @State private var isSaved = false
     
-    init(flight: Flight, onDelete: (() -> Void)? = nil, onSave: (() -> Void)? = nil) {
+    init(flight: Flight, onDelete: (() -> Void)? = nil, onSave: ((@escaping (Bool) -> Void) -> Void)? = nil, savedDate: String? = nil) {
         self.flight = flight
         self.onDelete = onDelete
         self.onSave = onSave
+        self.savedDate = savedDate
         _currentFlight = State(initialValue: flight)
+    }
+    
+    // Helper function to format time strings cleanly in airport's local timezone
+    private func formatTimeClean(_ timeString: String?) -> String? {
+        guard let timeString = timeString else { return nil }
+        
+        // Parse format like "2025-10-05 06:38-07:00"
+        let inputFormatter = DateFormatter()
+        inputFormatter.dateFormat = "yyyy-MM-dd HH:mmZZZZZ"
+        
+        guard let date = inputFormatter.date(from: timeString) else {
+            return timeString // Return original if parsing fails
+        }
+        
+        // Extract timezone offset from original string (e.g., "-07:00" from "2025-10-05 06:38-07:00")
+        if let range = timeString.range(of: "[+-]\\d{2}:\\d{2}$", options: .regularExpression) {
+            let offsetString = String(timeString[range])
+            // Parse offset like "-07:00" into seconds
+            let components = offsetString.replacingOccurrences(of: ":", with: "").replacingOccurrences(of: "+", with: "")
+            if let hours = Int(components.prefix(3)), let minutes = Int(components.suffix(2)) {
+                let seconds = (abs(hours) * 3600 + minutes * 60) * (hours < 0 ? -1 : 1)
+                if let timezone = TimeZone(secondsFromGMT: seconds) {
+                    let outputFormatter = DateFormatter()
+                    outputFormatter.dateFormat = "MMM d, h:mm a"
+                    outputFormatter.timeZone = timezone
+                    return outputFormatter.string(from: date)
+                }
+            }
+        }
+        
+        // Fallback: display in original timezone
+        let outputFormatter = DateFormatter()
+        outputFormatter.dateFormat = "MMM d, h:mm a"
+        return outputFormatter.string(from: date)
     }
     
     var body: some View {
@@ -785,7 +1072,7 @@ struct FlightDetailView: View {
                                 .font(.system(size: 32, weight: .bold))
                                 .foregroundColor(.primary)
                             
-                            if let depAirport = currentFlight.fullData.departure?.airport?.name {
+                            if let depAirport = currentFlight.fullData?.departure?.airport?.name {
                                 Text(depAirport)
                                     .font(.system(size: 14))
                                     .foregroundColor(.secondary)
@@ -803,7 +1090,7 @@ struct FlightDetailView: View {
                                 .font(.system(size: 32, weight: .bold))
                                 .foregroundColor(.primary)
                             
-                            if let arrAirport = currentFlight.fullData.arrival?.airport?.name {
+                            if let arrAirport = currentFlight.fullData?.arrival?.airport?.name {
                                 Text(arrAirport)
                                     .font(.system(size: 14))
                                     .foregroundColor(.secondary)
@@ -818,19 +1105,20 @@ struct FlightDetailView: View {
                     .padding(.horizontal)
                     
                     // Live Tracking Map
-                    if let location = currentFlight.fullData.location,
+                    if let location = currentFlight.fullData?.location,
                        let lat = location.lat,
                        let lon = location.lon {
                         LiveTrackingMapView(
                             location: location,
                             flightNumber: currentFlight.flightNumber,
-                            departure: currentFlight.fullData.departure?.airport,
-                            arrival: currentFlight.fullData.arrival?.airport
+                            departure: currentFlight.fullData?.departure?.airport,
+                            arrival: currentFlight.fullData?.arrival?.airport,
+                            timeUntilLanding: currentFlight.fullData?.timeUntilLanding
                         )
                     }
                     
                     // Departure Info
-                    if let departure = currentFlight.fullData.departure {
+                    if let departure = currentFlight.fullData?.departure {
                         InfoSection(title: "Departure", icon: "airplane.departure") {
                             if let airport = departure.airport?.name {
                                 InfoRow(label: "Airport", value: airport)
@@ -841,20 +1129,20 @@ struct FlightDetailView: View {
                             if let gate = departure.gate {
                                 InfoRow(label: "Gate", value: gate)
                             }
-                            if let scheduled = departure.scheduledTime?.local {
+                            if let scheduled = formatTimeClean(departure.scheduledTime?.local) {
                                 InfoRow(label: "Scheduled", value: scheduled)
                             }
-                            if let revised = departure.revisedTime?.local {
+                            if let revised = formatTimeClean(departure.revisedTime?.local) {
                                 InfoRow(label: "Revised", value: revised, valueColor: .orange)
                             }
-                            if let runway = departure.runwayTime?.local {
+                            if let runway = formatTimeClean(departure.runwayTime?.local) {
                                 InfoRow(label: "Runway Time", value: runway, valueColor: .green)
                             }
                         }
                     }
                     
                     // Arrival Info
-                    if let arrival = currentFlight.fullData.arrival {
+                    if let arrival = currentFlight.fullData?.arrival {
                         InfoSection(title: "Arrival", icon: "airplane.arrival") {
                             if let airport = arrival.airport?.name {
                                 InfoRow(label: "Airport", value: airport)
@@ -865,25 +1153,22 @@ struct FlightDetailView: View {
                             if let gate = arrival.gate {
                                 InfoRow(label: "Gate", value: gate)
                             }
-                            if let scheduled = arrival.scheduledTime?.local {
+                            if let scheduled = formatTimeClean(arrival.scheduledTime?.local) {
                                 InfoRow(label: "Scheduled", value: scheduled)
                             }
-                            if let predicted = arrival.predictedTime?.local {
+                            if let predicted = formatTimeClean(arrival.predictedTime?.local) {
                                 InfoRow(label: "Predicted", value: predicted, valueColor: .blue)
-                            }
-                            if let revised = arrival.revisedTime?.local {
-                                InfoRow(label: "Revised", value: revised, valueColor: .orange)
                             }
                         }
                     }
                     
                     // Flight Info
                     InfoSection(title: "Flight Information", icon: "info.circle") {
-                        if let callSign = currentFlight.fullData.callSign {
+                        if let callSign = currentFlight.fullData?.callSign {
                             InfoRow(label: "Call Sign", value: callSign)
                         }
                         
-                        if let aircraft = currentFlight.fullData.aircraft {
+                        if let aircraft = currentFlight.fullData?.aircraft {
                             if let model = aircraft.model {
                                 InfoRow(label: "Aircraft", value: model)
                             }
@@ -892,17 +1177,17 @@ struct FlightDetailView: View {
                             }
                         }
                         
-                        if let distance = currentFlight.fullData.greatCircleDistance {
+                        if let distance = currentFlight.fullData?.greatCircleDistance {
                             if let miles = distance.mile {
                                 InfoRow(label: "Distance", value: String(format: "%.0f miles", miles))
                             }
                         }
                         
-                        if let codeshareStatus = currentFlight.fullData.codeshareStatus {
+                        if let codeshareStatus = currentFlight.fullData?.codeshareStatus {
                             InfoRow(label: "Codeshare", value: codeshareStatus)
                         }
                         
-                        if let updated = currentFlight.fullData.lastUpdatedUtc {
+                        if let updated = currentFlight.fullData?.lastUpdatedUtc {
                             InfoRow(label: "Last Updated", value: updated)
                         }
                     }
@@ -936,11 +1221,14 @@ struct FlightDetailView: View {
                         // Show save button if this is from search results
                         if let onSave = onSave {
                             Button(action: {
-                                onSave()
-                                isSaved = true
+                                onSave { success in
+                                    if success {
+                                        isSaved = true
+                                    }
+                                }
                             }) {
                                 Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                                    .foregroundColor(isSaved ? .blue : .blue)
+                                    .foregroundColor(.blue)
                             }
                         }
                         
@@ -950,14 +1238,41 @@ struct FlightDetailView: View {
                     }
                 }
             }
+            .onDisappear {
+                // Request review after closing a search result detail for the first time
+                // But NOT if it was dismissed programmatically for paywall
+                if onSave != nil { // Only for search results, not saved flights
+                    let hasRequestedReview = UserDefaults.standard.bool(forKey: "hasRequestedReview")
+                    let dismissedForPaywall = UserDefaults.standard.bool(forKey: "dismissedForPaywall")
+                    
+                    if !hasRequestedReview && !dismissedForPaywall {
+                        // Small delay to ensure the sheet is fully dismissed
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                                SKStoreReviewController.requestReview(in: windowScene)
+                                UserDefaults.standard.set(true, forKey: "hasRequestedReview")
+                                print("⭐ Requested App Store review")
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     
     private func refreshFlight() {
-        // Extract date from scheduled departure time
-        guard let date = FlightAPIService.extractDate(from: currentFlight.fullData.departure?.scheduledTime?.utc) else {
-            print("Cannot refresh: no scheduled time")
-            return
+        // Use savedDate if available, otherwise extract from local departure time
+        let date: String
+        if let savedDate = savedDate {
+            date = savedDate
+        } else {
+            // Extract from local departure time
+            guard let departureLocal = currentFlight.fullData?.departure?.scheduledTime?.local,
+                  let extractedDate = departureLocal.components(separatedBy: " ").first else {
+                print("Cannot refresh: no local departure time")
+                return
+            }
+            date = extractedDate
         }
         
         isRefreshing = true
@@ -967,7 +1282,8 @@ struct FlightDetailView: View {
                 print("🔄 Refreshing flight \(currentFlight.flightNumber) on \(date)")
                 let flightDataArray = try await FlightAPIService.shared.searchFlight(
                     flightNumber: currentFlight.flightNumber,
-                    date: date
+                    date: date,
+                    single: true  // Only get the flight matching departure date
                 )
                 
                 if let flightData = flightDataArray.first,
@@ -1059,6 +1375,7 @@ struct LiveTrackingMapView: View {
     let flightNumber: String
     let departure: AirportInfo?
     let arrival: AirportInfo?
+    let timeUntilLanding: TimeUntilLanding?
     
     private var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(
@@ -1076,6 +1393,37 @@ struct LiveTrackingMapView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            // Time Until Landing Banner (if available)
+            if let timeUntil = timeUntilLanding, let message = timeUntil.message {
+                HStack(spacing: 12) {
+                    Image(systemName: "clock.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Time Until Landing")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.9))
+                        Text(message)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                    
+                    Spacer()
+                }
+                .padding()
+                .background(
+                    LinearGradient(
+                        gradient: Gradient(colors: [Color.blue, Color.blue.opacity(0.8)]),
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .cornerRadius(16)
+                .shadow(color: Color.blue.opacity(0.3), radius: 10, x: 0, y: 5)
+                .padding(.horizontal)
+            }
+            
             // Header
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
@@ -1526,6 +1874,231 @@ struct LiveDataCard: View {
         .frame(maxWidth: .infinity)
         .background(Color.white)
         .cornerRadius(10)
+    }
+}
+
+struct SettingsView: View {
+    @Environment(\.dismiss) var dismiss
+    @ObservedObject var subscriptionManager: SubscriptionManager
+    let onUpgrade: () -> Void
+    
+    var body: some View {
+        NavigationView {
+            List {
+                // Subscription Section
+                Section {
+                    if subscriptionManager.hasActiveSubscription {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.system(size: 24))
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Premium Active")
+                                    .font(.system(size: 17, weight: .semibold))
+                                Text("Thank you for subscribing!")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    } else {
+                        Button(action: onUpgrade) {
+                            HStack {
+                                Image(systemName: "crown.fill")
+                                    .foregroundColor(.yellow)
+                                    .font(.system(size: 24))
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Upgrade to Premium")
+                                        .font(.system(size: 17, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                    Text("Unlock unlimited flight tracking")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Spacer()
+                                
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 8)
+                        }
+                    }
+                } header: {
+                    Text("Subscription")
+                }
+                
+                // Support Section
+                Section {
+                    Button(action: {
+                        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                            SKStoreReviewController.requestReview(in: windowScene)
+                            print("⭐ Rate app button tapped")
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "star.fill")
+                                .foregroundColor(.orange)
+                                .font(.system(size: 20))
+                            
+                            Text("Rate App")
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
+                            
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 14))
+                        }
+                    }
+                } header: {
+                    Text("Support")
+                }
+                
+                // App Info Section
+                Section {
+                    HStack {
+                        Text("Version")
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("About")
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct OnboardingView: View {
+    @Binding var isPresented: Bool
+    let onComplete: () -> Void
+    
+    @State private var currentPage = 0
+    
+    var body: some View {
+        ZStack {
+            // Background gradient
+            LinearGradient(
+                gradient: Gradient(colors: [Color(red: 0.95, green: 0.97, blue: 1.0), Color.white]),
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                Spacer()
+                
+                // Paging content
+                TabView(selection: $currentPage) {
+                    // Slide 1 - Track Live Flights
+                    OnboardingSlide(
+                        imageName: "IMG_1949",
+                        title: "Track Live Flights",
+                        description: "Follow flights in real-time with live location tracking, altitude, speed, and flight path visualization."
+                    )
+                    .tag(0)
+                    
+                    // Slide 2 - Save & Monitor
+                    OnboardingSlide(
+                        imageName: "IMG_1950",
+                        title: "Save & Monitor Flights",
+                        description: "Save your favorite flights and check their status anytime. Get updates on departures, arrivals, and delays."
+                    )
+                    .tag(1)
+                }
+                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+                
+                Spacer()
+                
+                // Continue/Get Started button
+                Button(action: {
+                    if currentPage == 0 {
+                        withAnimation {
+                            currentPage = 1
+                        }
+                    } else {
+                        completeOnboarding()
+                    }
+                }) {
+                    Text(currentPage == 0 ? "Continue" : "Get Started")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .background(Color.blue)
+                        .cornerRadius(16)
+                }
+                .padding(.horizontal, 30)
+                .padding(.bottom, 50)
+            }
+        }
+    }
+    
+    private func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+        isPresented = false
+        // Small delay before showing paywall
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onComplete()
+        }
+    }
+}
+
+struct OnboardingSlide: View {
+    let imageName: String
+    let title: String
+    let description: String
+    
+    var body: some View {
+        VStack(spacing: 30) {
+            // Image placeholder (will show the actual images)
+            if let uiImage = UIImage(named: imageName) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 400)
+                    .cornerRadius(20)
+                    .shadow(color: Color.black.opacity(0.1), radius: 20, x: 0, y: 10)
+                    .padding(.horizontal, 40)
+            } else {
+                // Fallback icon if image not found
+                Image(systemName: "airplane.circle.fill")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 200)
+                    .foregroundColor(.blue)
+                    .padding(.horizontal, 40)
+            }
+            
+            VStack(spacing: 16) {
+                Text(title)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.primary)
+                    .multilineTextAlignment(.center)
+                
+                Text(description)
+                    .font(.system(size: 17))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+                    .lineSpacing(4)
+            }
+        }
+        .padding(.vertical, 20)
     }
 }
 

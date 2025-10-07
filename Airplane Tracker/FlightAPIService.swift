@@ -23,10 +23,26 @@ struct FlightData: Codable, Identifiable {
     let greatCircleDistance: Distance?
     let codeshareStatus: String?
     let location: LiveLocation?
+    let timeUntilLanding: TimeUntilLanding?
     
     enum CodingKeys: String, CodingKey {
         case number, callSign, status, isCargo, departure, arrival, airline, aircraft
         case lastUpdatedUtc, greatCircleDistance, codeshareStatus, location
+        case timeUntilLanding = "time_until_landing"
+    }
+}
+
+struct TimeUntilLanding: Codable {
+    let minutes: Int?
+    let hours: Int?
+    let totalMinutes: Int?
+    let status: String?
+    let message: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case minutes, hours
+        case totalMinutes = "total_minutes"
+        case status, message
     }
 }
 
@@ -161,7 +177,7 @@ class FlightAPIService {
     static let shared = FlightAPIService()
     
     // API base URL
-    private let baseURL = "http://localhost:5000"
+    private let baseURL = "https://monoapi-bi2r.onrender.com"
     
     private init() {}
     
@@ -170,8 +186,9 @@ class FlightAPIService {
     /// - Parameters:
     ///   - flightNumber: The flight number (e.g., "AS25", "AA1004")
     ///   - date: Optional date in YYYY-MM-DD format
+    ///   - single: If true, requests only the flight matching the departure date (default: false)
     /// - Returns: Array of FlightData objects
-    func searchFlight(flightNumber: String, date: String? = nil) async throws -> [FlightData] {
+    func searchFlight(flightNumber: String, date: String? = nil, single: Bool = false) async throws -> [FlightData] {
         guard !flightNumber.isEmpty else {
             throw FlightAPIError.missingRequiredParameters
         }
@@ -179,22 +196,28 @@ class FlightAPIService {
         // Remove spaces from flight number for URL
         let cleanFlightNumber = flightNumber.replacingOccurrences(of: " ", with: "")
         
-        let urlString: String
+        var urlString: String
         if let date = date {
             urlString = "\(baseURL)/flights/\(cleanFlightNumber)/\(date)"
+            // Add single=true query parameter if requested
+            if single {
+                urlString += "?single=true"
+            }
         } else {
             urlString = "\(baseURL)/flights/\(cleanFlightNumber)"
         }
+        
+        print("🌐 API Request: \(urlString)")
         
         guard let url = URL(string: urlString) else {
             throw FlightAPIError.invalidURL
         }
         
-        return try await performRequest(url: url)
+        return try await performRequest(url: url, expectSingle: single)
     }
     
     // MARK: - Helper Methods
-    private func performRequest(url: URL) async throws -> [FlightData] {
+    private func performRequest(url: URL, expectSingle: Bool = false) async throws -> [FlightData] {
         let request = URLRequest(url: url)
         
         do {
@@ -211,9 +234,22 @@ class FlightAPIService {
                 do {
                     let decoder = JSONDecoder()
                     
-                    // Decode as array of FlightData
-                    let flights = try decoder.decode([FlightData].self, from: data)
-                    return flights
+                    // If expecting a single flight, try to decode as single object first
+                    if expectSingle {
+                        do {
+                            let flight = try decoder.decode(FlightData.self, from: data)
+                            return [flight]
+                        } catch {
+                            print("⚠️ Failed to decode as single object, trying as array: \(error)")
+                            // Fall back to array decoding
+                            let flights = try decoder.decode([FlightData].self, from: data)
+                            return flights
+                        }
+                    } else {
+                        // Decode as array of FlightData
+                        let flights = try decoder.decode([FlightData].self, from: data)
+                        return flights
+                    }
                 } catch {
                     print("Decoding error: \(error)")
                     throw FlightAPIError.decodingError(error)
